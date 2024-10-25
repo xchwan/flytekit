@@ -17,7 +17,12 @@ from mashumaro.types import SerializableType
 
 from flytekit.core.constants import MESSAGEPACK
 from flytekit.core.context_manager import FlyteContext, FlyteContextManager
-from flytekit.core.type_engine import TypeEngine, TypeTransformer, TypeTransformerFailedError, get_underlying_type
+from flytekit.core.type_engine import (
+    AsyncTypeTransformer,
+    TypeEngine,
+    TypeTransformerFailedError,
+    get_underlying_type,
+)
 from flytekit.exceptions.user import FlyteAssertion
 from flytekit.loggers import logger
 from flytekit.models.core import types as _core_types
@@ -209,6 +214,21 @@ class FlyteFile(SerializableType, os.PathLike, typing.Generic[T], DataClassJSONM
         t = FlyteFilePathTransformer()
         return t.to_python_value(ctx, lit, cls)
 
+    @classmethod
+    def new(cls, filename: str | os.PathLike) -> FlyteFile:
+        """
+        Create a new FlyteFile object in the current Flyte working directory
+        """
+
+        if os.path.isabs(filename):
+            raise ValueError("Path should be relative.")
+
+        ctx = FlyteContextManager.current_context()
+
+        path = os.path.join(ctx.user_space_params.working_directory, filename)
+
+        return cls(path=path)
+
     def __class_getitem__(cls, item: typing.Union[str, typing.Type]) -> typing.Type[FlyteFile]:
         from flytekit.types.file import FileExt
 
@@ -304,6 +324,9 @@ class FlyteFile(SerializableType, os.PathLike, typing.Generic[T], DataClassJSONM
     def download(self) -> str:
         return self.__fspath__()
 
+    async def _download(self) -> str:
+        return self.__fspath__()
+
     @contextmanager
     def open(
         self,
@@ -349,8 +372,11 @@ class FlyteFile(SerializableType, os.PathLike, typing.Generic[T], DataClassJSONM
     def __str__(self):
         return self.path
 
+    def __hash__(self):
+        return hash(str(self.path))
 
-class FlyteFilePathTransformer(TypeTransformer[FlyteFile]):
+
+class FlyteFilePathTransformer(AsyncTypeTransformer[FlyteFile]):
     def __init__(self):
         super().__init__(name="FlyteFilePath", t=FlyteFile)
 
@@ -428,7 +454,7 @@ class FlyteFilePathTransformer(TypeTransformer[FlyteFile]):
             if real_type not in expected_type:
                 raise ValueError(f"Incorrect file type, expected {expected_type}, got {real_type}")
 
-    def to_literal(
+    async def async_to_literal(
         self,
         ctx: FlyteContext,
         python_val: typing.Union[FlyteFile, os.PathLike, str],
@@ -506,9 +532,11 @@ class FlyteFilePathTransformer(TypeTransformer[FlyteFile]):
         if should_upload:
             headers = self.get_additional_headers(source_path)
             if remote_path is not None:
-                remote_path = ctx.file_access.put_data(source_path, remote_path, is_multipart=False, **headers)
+                remote_path = await ctx.file_access.async_put_data(
+                    source_path, remote_path, is_multipart=False, **headers
+                )
             else:
-                remote_path = ctx.file_access.put_raw_data(source_path, **headers)
+                remote_path = await ctx.file_access.async_put_raw_data(source_path, **headers)
             return Literal(scalar=Scalar(blob=Blob(metadata=meta, uri=unquote(str(remote_path)))))
         # If not uploading, then we can only take the original source path as the uri.
         else:
@@ -549,7 +577,7 @@ class FlyteFilePathTransformer(TypeTransformer[FlyteFile]):
         else:
             raise TypeTransformerFailedError(f"Unsupported binary format: `{binary_idl_object.tag}`")
 
-    def to_python_value(
+    async def async_to_python_value(
         self, ctx: FlyteContext, lv: Literal, expected_python_type: typing.Union[typing.Type[FlyteFile], os.PathLike]
     ) -> FlyteFile:
         # Handle dataclass attribute access

@@ -6,7 +6,7 @@ import types
 import typing
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, is_dataclass
-from typing import Dict, Generator, List, Optional, Type, Union
+from typing import Dict, Generator, Generic, List, Optional, Type, Union
 
 import msgpack
 from dataclasses_json import config
@@ -19,7 +19,7 @@ from typing_extensions import Annotated, TypeAlias, get_args, get_origin
 from flytekit import lazy_module
 from flytekit.core.constants import MESSAGEPACK
 from flytekit.core.context_manager import FlyteContext, FlyteContextManager
-from flytekit.core.type_engine import TypeEngine, TypeTransformer, TypeTransformerFailedError
+from flytekit.core.type_engine import AsyncTypeTransformer, TypeEngine, TypeTransformerFailedError
 from flytekit.deck.renderer import Renderable
 from flytekit.loggers import developer_logger, logger
 from flytekit.models import literals
@@ -223,7 +223,7 @@ def extract_cols_and_format(
     return t, ordered_dict_cols, fmt, pa_schema
 
 
-class StructuredDatasetEncoder(ABC):
+class StructuredDatasetEncoder(ABC, Generic[T]):
     def __init__(
         self,
         python_type: Type[T],
@@ -290,7 +290,7 @@ class StructuredDatasetEncoder(ABC):
         raise NotImplementedError
 
 
-class StructuredDatasetDecoder(ABC):
+class StructuredDatasetDecoder(ABC, Generic[DF]):
     def __init__(
         self,
         python_type: Type[DF],
@@ -399,7 +399,7 @@ def get_supported_types():
 class DuplicateHandlerError(ValueError): ...
 
 
-class StructuredDatasetTransformerEngine(TypeTransformer[StructuredDataset]):
+class StructuredDatasetTransformerEngine(AsyncTypeTransformer[StructuredDataset]):
     """
     Think of this transformer as a higher-level meta transformer that is used for all the dataframe types.
     If you are bringing a custom data frame type, or any data frame type, to flytekit, instead of
@@ -594,7 +594,7 @@ class StructuredDatasetTransformerEngine(TypeTransformer[StructuredDataset]):
     def assert_type(self, t: Type[StructuredDataset], v: typing.Any):
         return
 
-    def to_literal(
+    async def async_to_literal(
         self,
         ctx: FlyteContext,
         python_val: Union[StructuredDataset, typing.Any],
@@ -606,6 +606,13 @@ class StructuredDatasetTransformerEngine(TypeTransformer[StructuredDataset]):
         python_type, *attrs = extract_cols_and_format(python_type)
         # In case it's a FlyteSchema
         sdt = StructuredDatasetType(format=self.DEFAULT_FORMATS.get(python_type, GENERIC_FORMAT))
+
+        if issubclass(python_type, StructuredDataset) and not isinstance(python_val, StructuredDataset):
+            # Catch a common mistake
+            raise TypeTransformerFailedError(
+                f"Expected a StructuredDataset instance, but got {type(python_val)} instead."
+                f" Did you forget to wrap your dataframe in a StructuredDataset instance?"
+            )
 
         if expected and expected.structured_dataset_type:
             sdt = StructuredDatasetType(
@@ -647,7 +654,7 @@ class StructuredDatasetTransformerEngine(TypeTransformer[StructuredDataset]):
                 if not uri:
                     raise ValueError(f"If dataframe is not specified, then the uri should be specified. {python_val}")
                 if not ctx.file_access.is_remote(uri):
-                    uri = ctx.file_access.put_raw_data(uri)
+                    uri = await ctx.file_access.async_put_raw_data(uri)
                 sd_model = literals.StructuredDataset(
                     uri=uri,
                     metadata=StructuredDatasetMetadata(structured_dataset_type=sdt),
@@ -745,7 +752,7 @@ class StructuredDatasetTransformerEngine(TypeTransformer[StructuredDataset]):
         else:
             raise TypeTransformerFailedError(f"Unsupported binary format: `{binary_idl_object.tag}`")
 
-    def to_python_value(
+    async def async_to_python_value(
         self, ctx: FlyteContext, lv: Literal, expected_python_type: Type[T] | StructuredDataset
     ) -> T | StructuredDataset:
         """
